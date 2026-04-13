@@ -4,7 +4,8 @@
 
 Step 1: Parse the Excel financial model and output:
   - data/indicators.json  (financial indicator nodes)
-  - data/dependencies.json (dependency edges)
+  - data/dependencies.json (dependency edges from formula parsing)
+  - data/child_relationships.json (parent-child edges from Excel structure)
 
 Run: python scripts/01_parse_excel.py
 """
@@ -17,7 +18,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import config
-from src.parser.indicator_registry import extract_indicators, save_indicators
+from src.parser.indicator_registry import (
+    extract_indicators,
+    save_indicators,
+    save_child_of_edges,
+)
 from src.parser.formula_parser import parse_dependencies, save_dependencies
 from src.parser.value_extractor import extract_values
 
@@ -36,34 +41,37 @@ def main():
 
     logger.info("=" * 60)
     logger.info("Step 1: Extracting indicators from Excel...")
-    indicators = extract_indicators(excel_path)
-    logger.info(f"  Extracted {len(indicators)} indicators")
+    indicators, child_edges = extract_indicators(excel_path)
+    logger.info(f"  Extracted {len(indicators)} indicators and {len(child_edges)} CHILD_OF edges")
 
     logger.info("Step 2: Extracting computed values...")
     indicators = extract_values(excel_path, indicators)
 
     logger.info("Step 3: Parsing formula dependencies...")
-    edges = parse_dependencies(indicators)
-    logger.info(f"  Extracted {len(edges)} dependency edges")
+    dependency_edges = parse_dependencies(indicators)
+    logger.info(f"  Extracted {len(dependency_edges)} dependency edges")
 
     logger.info("Step 4: Saving to JSON...")
     save_indicators(indicators, config.INDICATORS_FILE)
-    save_dependencies(edges, config.DEPENDENCIES_FILE)
+    save_dependencies(dependency_edges, config.DEPENDENCIES_FILE)
+    save_child_of_edges(child_edges, config.CHILD_RELATIONSHIPS_FILE)
 
     # Quick summary
     circular_inds = sum(1 for i in indicators if i.get("is_circular"))
-    circular_edges = sum(1 for e in edges if e.get("is_circular"))
-    cross_sheet_edges = sum(1 for e in edges if e.get("is_cross_sheet"))
+    circular_edges = sum(1 for e in dependency_edges if e.get("is_circular"))
+    cross_sheet_edges = sum(1 for e in dependency_edges if e.get("is_cross_sheet"))
 
     logger.info("=" * 60)
     logger.info("Summary:")
     logger.info(f"  Indicators:          {len(indicators)}")
-    logger.info(f"  Dependency edges:    {len(edges)}")
+    logger.info(f"  Child relationships: {len(child_edges)}")
+    logger.info(f"  Dependency edges:    {len(dependency_edges)}")
     logger.info(f"  Cross-sheet edges:   {cross_sheet_edges}")
     logger.info(f"  Circular indicators: {circular_inds}")
     logger.info(f"  Circular edges:      {circular_edges}")
     logger.info(f"  Output: {config.INDICATORS_FILE}")
     logger.info(f"  Output: {config.DEPENDENCIES_FILE}")
+    logger.info(f"  Output: {config.CHILD_RELATIONSHIPS_FILE}")
     logger.info("=" * 60)
     logger.info("Done. Review data/indicators.json before loading to Neo4j.")
 

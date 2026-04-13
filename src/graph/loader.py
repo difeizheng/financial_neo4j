@@ -144,7 +144,9 @@ class GraphLoader:
                         n.is_input      = row.is_input,
                         n.is_circular   = row.is_circular,
                         n.value_year1   = row.value_year1,
-                        n.values_json   = row.values_json
+                        n.values_json   = row.values_json,
+                        n.parent_id     = row.parent_id,
+                        n.parent_name   = row.parent_name
                     """,
                     batch=batch,
                 )
@@ -246,6 +248,23 @@ class GraphLoader:
             )
         logger.info("DEPENDS_ON relationships loaded.")
 
+    def load_child_of(self, edges: list[dict]):
+        """Load CHILD_OF parent-child relationship edges."""
+        prepared = self._prepare_edges(edges)
+        logger.info(f"Loading {len(prepared)} CHILD_OF relationships...")
+        for i in range(0, len(prepared), _BATCH_SIZE):
+            batch = prepared[i : i + _BATCH_SIZE]
+            self._run(
+                """
+                UNWIND $batch AS row
+                MATCH (child:Indicator {id: row.source_id})
+                MATCH (parent:Indicator {id: row.target_id})
+                MERGE (child)-[r:CHILD_OF]->(parent)
+                """,
+                batch=batch,
+            )
+        logger.info("CHILD_OF relationships loaded.")
+
     def load_belongs_to(self, indicators: list[dict]):
         logger.info("Loading BELONGS_TO relationships...")
         prepared = self._prepare_indicators(indicators)
@@ -333,7 +352,7 @@ class GraphLoader:
 
     # ── Full load ─────────────────────────────────────────────────────────────
 
-    def load_all(self, indicators: list[dict], edges: list[dict]):
+    def load_all(self, indicators: list[dict], edges: list[dict], child_edges: list[dict] = None):
         self.setup_schema()
 
         sheet_names = list(dict.fromkeys(ind["sheet"] for ind in indicators))
@@ -349,4 +368,45 @@ class GraphLoader:
         self.load_in_category(indicators)
         self.load_feeds_into()
 
+        # Load CHILD_OF relationships
+        if child_edges:
+            self.load_child_of(child_edges)
+
         logger.info("All data loaded into Neo4j.")
+
+    # ── Update values (for parameter modification) ─────────────────────────────
+
+    def update_indicator_values(self, new_values: dict[str, list]):
+        """Batch update value_year1 and values_json for multiple indicators.
+
+        Args:
+            new_values: {indicator_id: [val_y1, val_y2, ..., val_y48]}
+                        If list is length 1, updates value_year1 only (single-value param).
+        """
+        rows = []
+        for ind_id, vals in new_values.items():
+            prefixed = self._prefix_id(ind_id)
+            if isinstance(vals, list) and len(vals) > 0:
+                row = {
+                    "id": prefixed,
+                    "value_year1": vals[0] if len(vals) >= 1 else None,
+                    "values_json": vals if len(vals) > 1 else None,
+                }
+                rows.append(row)
+            elif isinstance(vals, (int, float)):
+                row = {"id": prefixed, "value_year1": vals, "values_json": None}
+                rows.append(row)
+
+        if not rows:
+            return
+
+        self._run(
+            """
+            UNWIND $rows AS row
+            MATCH (n:Indicator {id: row.id})
+            SET n.value_year1 = row.value_year1,
+                n.values_json = row.values_json
+            """,
+            rows=rows,
+        )
+        logger.info(f"Updated values for {len(rows)} indicators.")

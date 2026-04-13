@@ -28,6 +28,7 @@ DATA_DIR = BASE_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
 INDICATORS_FILE = DATA_DIR / "indicators.json"
 DEPENDENCIES_FILE = DATA_DIR / "dependencies.json"
+CHILD_RELATIONSHIPS_FILE = DATA_DIR / "child_relationships.json"
 
 # Multi-task data directory
 TASKS_DIR = BASE_DIR / "tasks"

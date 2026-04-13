@@ -84,6 +84,9 @@ class TaskManager:
     def get_dependencies_path(self, task_id: str) -> Path:
         return self.tasks_dir / task_id / "dependencies.json"
 
+    def get_child_relationships_path(self, task_id: str) -> Path:
+        return self.tasks_dir / task_id / "child_relationships.json"
+
     def get_coverage_path(self, task_id: str) -> Path:
         return self.tasks_dir / task_id / "coverage.json"
 
@@ -108,3 +111,9 @@ class TaskManager:
         log_path = self.get_log_path(task_id, step)
         if log_path.exists():
             log_path.unlink()
+
+    def get_param_overrides_path(self, task_id: str) -> Path:
+        return self.tasks_dir / task_id / "param_overrides.json"
+
+    def get_param_snapshot_path(self, task_id: str) -> Path:
+        return self.tasks_dir / task_id / "param_snapshot.json"

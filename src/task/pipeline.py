@@ -217,7 +217,12 @@ class PipelineRunner:
                 sheet_categories=sheet_categories,
                 progress_callback=indicators_cb,
             )
-            tm.append_log(task_id, f"提取到 {len(indicators)} 个指标", step=2)
+            # extract_indicators now returns (indicators, child_edges)
+            if isinstance(indicators, tuple):
+                indicators, child_edges = indicators
+            else:
+                child_edges = []
+            tm.append_log(task_id, f"提取到 {len(indicators)} 个指标, {len(child_edges)} 个父子关系", step=2)
             check_stop()
 
             # ── Phase 2: extract values (0.40 → 0.85) ──────────────────────
@@ -243,9 +248,10 @@ class PipelineRunner:
 
             # ── Save ────────────────────────────────────────────────────────
             update("保存结果...", 0.95)
-            from src.parser.indicator_registry import save_indicators
+            from src.parser.indicator_registry import save_indicators, save_child_of_edges
             from src.parser.formula_parser import save_dependencies
             save_indicators(indicators, tm.get_indicators_path(task_id))
+            save_child_of_edges(child_edges, tm.get_child_relationships_path(task_id))
             save_dependencies(edges, tm.get_dependencies_path(task_id))
 
             # ── Phase 4: coverage scan (0.95 → 1.0) ────────────────────────
@@ -312,7 +318,11 @@ class PipelineRunner:
 
             indicators = _json.loads(tm.get_indicators_path(task_id).read_text(encoding="utf-8"))
             edges = _json.loads(tm.get_dependencies_path(task_id).read_text(encoding="utf-8"))
-            tm.append_log(task_id, f"加载数据：{len(indicators)} 指标，{len(edges)} 边", step=3)
+            child_edges = []
+            child_path = tm.get_child_relationships_path(task_id)
+            if child_path.exists():
+                child_edges = _json.loads(child_path.read_text(encoding="utf-8"))
+            tm.append_log(task_id, f"加载数据：{len(indicators)} 指标，{len(edges)} 依赖边，{len(child_edges)} 父子边", step=3)
             check_stop()
 
             meta.step3.progress_msg = "加载数据到Neo4j..."
@@ -320,7 +330,7 @@ class PipelineRunner:
             tm.save_task(meta)
 
             with GraphLoader(uri, user, password, task_id=task_id) as loader:
-                loader.load_all(indicators, edges)
+                loader.load_all(indicators, edges, child_edges)
 
             tm.append_log(task_id, "Neo4j加载完成", step=3)
             meta.step3 = StepInfo(status="done", progress_msg="加载完成", progress_pct=1.0)

@@ -6,7 +6,8 @@ Step 2: Load parsed indicators and dependencies into Neo4j.
 
 Prerequisites:
   - Neo4j running (see .env for connection settings)
-  - data/indicators.json and data/dependencies.json exist (run 01_parse_excel.py first)
+  - data/indicators.json, data/dependencies.json, and data/child_relationships.json exist
+    (run 01_parse_excel.py first)
 
 Run: python scripts/02_load_neo4j.py
 """
@@ -18,7 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import config
-from src.parser.indicator_registry import load_indicators
+from src.parser.indicator_registry import load_indicators, load_child_of_edges
 from src.parser.formula_parser import load_dependencies
 from src.graph.loader import GraphLoader
 
@@ -40,11 +41,14 @@ def main():
     logger.info("Loading parsed data...")
     indicators = load_indicators(config.INDICATORS_FILE)
     edges = load_dependencies(config.DEPENDENCIES_FILE)
-    logger.info(f"  {len(indicators)} indicators, {len(edges)} edges")
+    child_edges = []
+    if config.CHILD_RELATIONSHIPS_FILE.exists():
+        child_edges = load_child_of_edges(config.CHILD_RELATIONSHIPS_FILE)
+    logger.info(f"  {len(indicators)} indicators, {len(edges)} deps, {len(child_edges)} child edges")
 
     logger.info(f"Connecting to Neo4j at {config.NEO4J_URI}...")
     with GraphLoader(config.NEO4J_URI, config.NEO4J_USER, config.NEO4J_PASSWORD) as loader:
-        loader.load_all(indicators, edges)
+        loader.load_all(indicators, edges, child_edges)
 
     logger.info("Done. Run 03_verify_graph.py to validate the graph.")
 
