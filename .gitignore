@@ -84,6 +84,7 @@ Thumbs.db
 
 # Runtime data
 data/
+tasks/
 
 # Temp files
 *~

@@ -9,12 +9,15 @@ Supports both OpenAI-compatible APIs and Anthropic Claude.
 
 import json
 import logging
+from typing import Optional
 from neo4j import GraphDatabase
 
 from src.llm.prompts import (
     SYSTEM_PROMPT,
     CYPHER_GENERATION_PROMPT,
     RESULT_INTERPRETATION_PROMPT,
+    get_system_prompt,
+    get_cypher_prompt,
 )
 
 logger = logging.getLogger(__name__)
@@ -64,10 +67,14 @@ class FinancialGraphChat:
         llm_api_key: str,
         llm_base_url: str,
         llm_model: str,
+        task_id: Optional[str] = None,
     ):
         self.driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
         self.llm = _make_llm_client(llm_provider, llm_api_key, llm_base_url, llm_model)
+        self.task_id = task_id
         self.history: list[dict] = []
+        # Build task-aware prompts
+        self._system_prompt = get_system_prompt(task_id)
 
     def close(self):
         self.driver.close()
@@ -86,10 +93,10 @@ class FinancialGraphChat:
 
     def _generate_cypher(self, question: str) -> str:
         """Ask LLM to generate a Cypher query for the question."""
-        prompt = CYPHER_GENERATION_PROMPT.format(question=question)
+        prompt = get_cypher_prompt(question, self.task_id)
         response = self.llm(
             [{"role": "user", "content": prompt}],
-            system=SYSTEM_PROMPT,
+            system=self._system_prompt,
         )
         # Strip any accidental markdown fences
         cypher = response.strip()
@@ -99,6 +106,23 @@ class FinancialGraphChat:
                 line for line in lines
                 if not line.startswith("```")
             ).strip()
+
+        # Some models (e.g. MiniMax) output tool-call XML instead of Cypher.
+        # Detect <invoke ...> patterns and fall back to a plain MATCH query.
+        if "<invoke" in cypher or ("tool_call" in cypher.lower() and "MATCH" not in cypher):
+            import re
+            logger.warning(f"Detected tool-call response from LLM, falling back to plain MATCH. Raw: {cypher[:200]}")
+            q_match = re.search(r'<parameter name="q">(.*?)</parameter>', cypher)
+            search_term = q_match.group(1).strip() if q_match else question[:30]
+            # Sanitize: remove quotes that would break Cypher
+            search_term = search_term.replace("'", "").replace('"', "")
+            task_filter = f" AND n.task_id = '{self.task_id}'" if self.task_id else ""
+            cypher = (
+                f"MATCH (n:Indicator) WHERE n.name CONTAINS '{search_term}'{task_filter} "
+                f"RETURN n.name, n.sheet, n.value_year1, n.formula_raw LIMIT 20"
+            )
+            logger.info(f"Fallback Cypher: {cypher}")
+
         return cypher
 
     def _interpret_results(self, question: str, results: list[dict]) -> str:
@@ -113,7 +137,7 @@ class FinancialGraphChat:
         )
         # Include conversation history for context
         messages = self.history + [{"role": "user", "content": prompt}]
-        return self.llm(messages, system=SYSTEM_PROMPT)
+        return self.llm(messages, system=self._system_prompt)
 
     def ask(self, question: str) -> dict:
         """

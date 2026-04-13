@@ -17,6 +17,7 @@ import logging
 from pathlib import Path
 
 from src.parser.sheet_config import CIRCULAR_GROUPS
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -70,11 +71,17 @@ def _normalize_sheet_name(raw: str) -> str:
     return raw.strip().strip("'\"")
 
 
-def parse_dependencies(indicators: list[dict]) -> list[dict]:
+def parse_dependencies(
+    indicators: list[dict],
+    circular_groups: Optional[list] = None,
+) -> list[dict]:
     """
     For each indicator with a formula, extract dependencies on other indicators.
     Returns a list of edge dicts.
+
+    circular_groups: if None, uses the hardcoded CIRCULAR_GROUPS (CLI path).
     """
+    groups = circular_groups if circular_groups is not None else CIRCULAR_GROUPS
     row_index = build_row_index(indicators)
 
     # Also build a name->id index for circular group annotation
@@ -145,7 +152,7 @@ def parse_dependencies(indicators: list[dict]) -> list[dict]:
                     })
 
     # 3. Annotate known circular groups
-    edges = _annotate_circular(edges, name_index, indicators)
+    edges = _annotate_circular(edges, name_index, indicators, groups)
 
     logger.info(f"Extracted {len(edges)} dependency edges")
     return edges
@@ -155,11 +162,12 @@ def _annotate_circular(
     edges: list[dict],
     name_index: dict,
     indicators: list[dict],
+    groups: list,
 ) -> list[dict]:
     """Mark edges and indicators that belong to known circular dependency groups."""
     circular_indicator_ids = set()
 
-    for group in CIRCULAR_GROUPS:
+    for group in groups:
         group_ids = set()
         for name in group["indicators"]:
             if name in name_index:

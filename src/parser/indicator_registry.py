@@ -17,6 +17,7 @@ from openpyxl import load_workbook
 from openpyxl.utils import column_index_from_string
 
 from src.parser.sheet_config import SHEET_CONFIGS, SHEET_CATEGORIES
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -68,28 +69,41 @@ def _make_id(sheet_name: str, name: str, row: int) -> str:
     return f"{safe_sheet}__{safe_name}__{row}"
 
 
-def extract_indicators(excel_path: Path) -> list[dict]:
+def extract_indicators(
+    excel_path: Path,
+    sheet_configs: Optional[dict] = None,
+    sheet_categories: Optional[dict] = None,
+    progress_callback: Optional[Callable[[str, float], None]] = None,
+) -> list[dict]:
     """
     Parse the Excel file and return a list of indicator dicts.
 
-    Each dict has:
-      id, name, sheet, sheet_category, row, formula_raw,
-      unit, section_number, is_input, yearly_values_rows (list of row nums)
+    sheet_configs: if None, uses the hardcoded SHEET_CONFIGS (CLI path).
+    sheet_categories: if None, uses the hardcoded SHEET_CATEGORIES.
+    progress_callback: optional callable(message, percent) for progress reporting.
     """
+    configs = sheet_configs if sheet_configs is not None else SHEET_CONFIGS
+    categories = sheet_categories if sheet_categories is not None else SHEET_CATEGORIES
+
     logger.info(f"Loading workbook (formulas): {excel_path}")
     wb = load_workbook(excel_path, data_only=False, read_only=True)
 
     all_indicators = []
+    sheet_names = list(configs.keys())
+    total = len(sheet_names)
 
-    for sheet_name, cfg in SHEET_CONFIGS.items():
+    for i, sheet_name in enumerate(sheet_names):
         if sheet_name not in wb.sheetnames:
             logger.warning(f"Sheet not found: {sheet_name!r}")
             continue
 
         ws = wb[sheet_name]
         logger.info(f"Processing sheet: {sheet_name}")
+        if progress_callback:
+            progress_callback(f"解析工作表: {sheet_name}", i / total)
 
-        indicators = _extract_from_sheet(ws, sheet_name, cfg)
+        cfg = configs[sheet_name]
+        indicators = _extract_from_sheet(ws, sheet_name, cfg, categories)
         logger.info(f"  → {len(indicators)} indicators extracted")
         all_indicators.extend(indicators)
 
@@ -98,7 +112,7 @@ def extract_indicators(excel_path: Path) -> list[dict]:
     return all_indicators
 
 
-def _extract_from_sheet(ws, sheet_name: str, cfg: dict) -> list[dict]:
+def _extract_from_sheet(ws, sheet_name: str, cfg: dict, sheet_categories: dict) -> list[dict]:
     """Extract indicators from a single sheet."""
     name_col = cfg["name_col"]
     formula_col = cfg["formula_col"]
@@ -107,7 +121,7 @@ def _extract_from_sheet(ws, sheet_name: str, cfg: dict) -> list[dict]:
     header_rows = set(cfg.get("header_rows", []))
     skip_patterns = cfg.get("skip_patterns", [])
     is_input = cfg.get("is_input", False)
-    sheet_category = SHEET_CATEGORIES.get(sheet_name, "其他")
+    sheet_category = sheet_categories.get(sheet_name, "其他")
 
     indicators = []
     current_category = ""  # tracks section headers in 参数输入表

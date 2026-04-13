@@ -18,14 +18,18 @@ Relationship types:
 CONSTRAINTS_AND_INDEXES = [
     # Uniqueness constraints
     "CREATE CONSTRAINT indicator_id IF NOT EXISTS FOR (n:Indicator) REQUIRE n.id IS UNIQUE",
-    "CREATE CONSTRAINT sheet_name IF NOT EXISTS FOR (n:Sheet) REQUIRE n.name IS UNIQUE",
-    "CREATE CONSTRAINT category_name IF NOT EXISTS FOR (n:Category) REQUIRE n.name IS UNIQUE",
+    # Note: Sheet.name and Category.name uniqueness removed to support multi-task isolation
+    # (same sheet name can appear in different tasks)
     # Indexes for common lookups
     "CREATE INDEX indicator_name IF NOT EXISTS FOR (n:Indicator) ON (n.name)",
     "CREATE INDEX indicator_sheet IF NOT EXISTS FOR (n:Indicator) ON (n.sheet)",
     "CREATE INDEX indicator_category IF NOT EXISTS FOR (n:Indicator) ON (n.category)",
     "CREATE INDEX indicator_is_input IF NOT EXISTS FOR (n:Indicator) ON (n.is_input)",
     "CREATE INDEX indicator_is_circular IF NOT EXISTS FOR (n:Indicator) ON (n.is_circular)",
+    # Multi-task support: task_id indexes
+    "CREATE INDEX indicator_task_id IF NOT EXISTS FOR (n:Indicator) ON (n.task_id)",
+    "CREATE INDEX sheet_task_id IF NOT EXISTS FOR (n:Sheet) ON (n.task_id)",
+    "CREATE INDEX category_task_id IF NOT EXISTS FOR (n:Category) ON (n.task_id)",
 ]
 
 # Sheet-level feed-into relationships (manually defined from known data flow)

@@ -3,9 +3,15 @@ loader.py
 
 Loads indicators and dependencies into Neo4j.
 Uses UNWIND for batch operations to maximize performance.
+
+Multi-task support: when task_id is provided, all nodes get a task_id property
+and indicator IDs are prefixed with "{task_id}__" for global uniqueness.
+When task_id is None (CLI path), behavior is identical to the original.
 """
 
+import copy
 import logging
+from typing import Optional
 from neo4j import GraphDatabase
 
 from src.graph.schema import (
@@ -20,8 +26,9 @@ _BATCH_SIZE = 500
 
 
 class GraphLoader:
-    def __init__(self, uri: str, user: str, password: str):
+    def __init__(self, uri: str, user: str, password: str, task_id: Optional[str] = None):
         self.driver = GraphDatabase.driver(uri, auth=(user, password))
+        self.task_id = task_id
 
     def close(self):
         self.driver.close()
@@ -36,9 +43,62 @@ class GraphLoader:
         with self.driver.session() as session:
             return session.run(query, **params)
 
+    def _prefix_id(self, indicator_id: str) -> str:
+        """Prefix indicator ID with task_id for global uniqueness."""
+        if self.task_id:
+            return f"{self.task_id}__{indicator_id}"
+        return indicator_id
+
+    def _prepare_indicators(self, indicators: list[dict]) -> list[dict]:
+        """Add task_id and prefix IDs when task_id is set."""
+        if not self.task_id:
+            return indicators
+        result = []
+        for ind in indicators:
+            item = dict(ind)
+            item["id"] = self._prefix_id(ind["id"])
+            item["task_id"] = self.task_id
+            result.append(item)
+        return result
+
+    def _prepare_edges(self, edges: list[dict]) -> list[dict]:
+        """Prefix source/target IDs when task_id is set."""
+        if not self.task_id:
+            return edges
+        result = []
+        for edge in edges:
+            item = dict(edge)
+            item["source_id"] = self._prefix_id(edge["source_id"])
+            item["target_id"] = self._prefix_id(edge["target_id"])
+            result.append(item)
+        return result
+
     # ── Schema setup ──────────────────────────────────────────────────────────
 
+    def _drop_legacy_constraints(self):
+        """Drop old single-property uniqueness constraints on Sheet.name and
+        Category.name that were created by the original single-task CLI.
+        These conflict with multi-task support where the same sheet name can
+        appear in multiple tasks."""
+        for label in ("Sheet", "Category"):
+            try:
+                with self.driver.session() as session:
+                    result = session.run(
+                        "SHOW CONSTRAINTS YIELD name, labelsOrTypes, properties, type "
+                        "WHERE labelsOrTypes = [$label] AND properties = ['name'] "
+                        "AND type = 'UNIQUENESS' RETURN name",
+                        label=label,
+                    )
+                    names = [r["name"] for r in result]
+                for cname in names:
+                    with self.driver.session() as session:
+                        session.run(f"DROP CONSTRAINT `{cname}` IF EXISTS")
+                    logger.info(f"Dropped legacy constraint: {cname}")
+            except Exception as e:
+                logger.warning(f"Could not inspect/drop legacy {label} constraint: {e}")
+
     def setup_schema(self):
+        self._drop_legacy_constraints()
         logger.info("Creating constraints and indexes...")
         for stmt in CONSTRAINTS_AND_INDEXES:
             try:
@@ -46,31 +106,68 @@ class GraphLoader:
             except Exception as e:
                 logger.warning(f"Schema stmt skipped ({e}): {stmt[:60]}")
 
+    # ── Clear task data ───────────────────────────────────────────────────────
+
+    def clear_task_data(self):
+        """Delete all nodes and relationships belonging to this task."""
+        if not self.task_id:
+            logger.warning("clear_task_data called without task_id — skipping")
+            return
+        logger.info(f"Clearing Neo4j data for task: {self.task_id}")
+        self._run(
+            "MATCH (n) WHERE n.task_id = $task_id DETACH DELETE n",
+            task_id=self.task_id,
+        )
+        logger.info("Task data cleared.")
+
     # ── Nodes ─────────────────────────────────────────────────────────────────
 
     def load_indicators(self, indicators: list[dict]):
-        logger.info(f"Loading {len(indicators)} Indicator nodes...")
-        for i in range(0, len(indicators), _BATCH_SIZE):
-            batch = indicators[i : i + _BATCH_SIZE]
-            self._run(
-                """
-                UNWIND $batch AS row
-                MERGE (n:Indicator {id: row.id})
-                SET n.name          = row.name,
-                    n.sheet         = row.sheet,
-                    n.sheet_category = row.sheet_category,
-                    n.category      = row.category,
-                    n.row           = row.row,
-                    n.formula_raw   = row.formula_raw,
-                    n.unit          = row.unit,
-                    n.section_number = row.section_number,
-                    n.is_input      = row.is_input,
-                    n.is_circular   = row.is_circular,
-                    n.value_year1   = row.value_year1,
-                    n.values_json   = row.values_json
-                """,
-                batch=batch,
-            )
+        prepared = self._prepare_indicators(indicators)
+        logger.info(f"Loading {len(prepared)} Indicator nodes...")
+        for i in range(0, len(prepared), _BATCH_SIZE):
+            batch = prepared[i : i + _BATCH_SIZE]
+            if self.task_id:
+                self._run(
+                    """
+                    UNWIND $batch AS row
+                    MERGE (n:Indicator {id: row.id})
+                    SET n.task_id        = row.task_id,
+                        n.name          = row.name,
+                        n.sheet         = row.sheet,
+                        n.sheet_category = row.sheet_category,
+                        n.category      = row.category,
+                        n.row           = row.row,
+                        n.formula_raw   = row.formula_raw,
+                        n.unit          = row.unit,
+                        n.section_number = row.section_number,
+                        n.is_input      = row.is_input,
+                        n.is_circular   = row.is_circular,
+                        n.value_year1   = row.value_year1,
+                        n.values_json   = row.values_json
+                    """,
+                    batch=batch,
+                )
+            else:
+                self._run(
+                    """
+                    UNWIND $batch AS row
+                    MERGE (n:Indicator {id: row.id})
+                    SET n.name          = row.name,
+                        n.sheet         = row.sheet,
+                        n.sheet_category = row.sheet_category,
+                        n.category      = row.category,
+                        n.row           = row.row,
+                        n.formula_raw   = row.formula_raw,
+                        n.unit          = row.unit,
+                        n.section_number = row.section_number,
+                        n.is_input      = row.is_input,
+                        n.is_circular   = row.is_circular,
+                        n.value_year1   = row.value_year1,
+                        n.values_json   = row.values_json
+                    """,
+                    batch=batch,
+                )
         logger.info("Indicator nodes loaded.")
 
     def load_sheets(self, sheet_names: list[str]):
@@ -80,35 +177,56 @@ class GraphLoader:
                 "name": name,
                 "index": i,
                 "description": SHEET_DESCRIPTIONS.get(name, ""),
+                "task_id": self.task_id,
             }
             for i, name in enumerate(sheet_names)
         ]
-        self._run(
-            """
-            UNWIND $rows AS row
-            MERGE (s:Sheet {name: row.name})
-            SET s.index = row.index, s.description = row.description
-            """,
-            rows=rows,
-        )
+        if self.task_id:
+            self._run(
+                """
+                UNWIND $rows AS row
+                MERGE (s:Sheet {name: row.name, task_id: row.task_id})
+                SET s.index = row.index, s.description = row.description
+                """,
+                rows=rows,
+            )
+        else:
+            self._run(
+                """
+                UNWIND $rows AS row
+                MERGE (s:Sheet {name: row.name})
+                SET s.index = row.index, s.description = row.description
+                """,
+                rows=rows,
+            )
 
     def load_categories(self, categories: list[str]):
         logger.info(f"Loading {len(categories)} Category nodes...")
-        rows = [{"name": c} for c in categories if c]
-        self._run(
-            """
-            UNWIND $rows AS row
-            MERGE (c:Category {name: row.name})
-            """,
-            rows=rows,
-        )
+        rows = [{"name": c, "task_id": self.task_id} for c in categories if c]
+        if self.task_id:
+            self._run(
+                """
+                UNWIND $rows AS row
+                MERGE (c:Category {name: row.name, task_id: row.task_id})
+                """,
+                rows=rows,
+            )
+        else:
+            self._run(
+                """
+                UNWIND $rows AS row
+                MERGE (c:Category {name: row.name})
+                """,
+                rows=rows,
+            )
 
     # ── Relationships ─────────────────────────────────────────────────────────
 
     def load_depends_on(self, edges: list[dict]):
-        logger.info(f"Loading {len(edges)} DEPENDS_ON relationships...")
-        for i in range(0, len(edges), _BATCH_SIZE):
-            batch = edges[i : i + _BATCH_SIZE]
+        prepared = self._prepare_edges(edges)
+        logger.info(f"Loading {len(prepared)} DEPENDS_ON relationships...")
+        for i in range(0, len(prepared), _BATCH_SIZE):
+            batch = prepared[i : i + _BATCH_SIZE]
             self._run(
                 """
                 UNWIND $batch AS row
@@ -130,50 +248,88 @@ class GraphLoader:
 
     def load_belongs_to(self, indicators: list[dict]):
         logger.info("Loading BELONGS_TO relationships...")
-        rows = [{"id": ind["id"], "sheet": ind["sheet"]} for ind in indicators]
+        prepared = self._prepare_indicators(indicators)
+        rows = [{"id": ind["id"], "sheet": ind["sheet"]} for ind in prepared]
         for i in range(0, len(rows), _BATCH_SIZE):
             batch = rows[i : i + _BATCH_SIZE]
-            self._run(
-                """
-                UNWIND $batch AS row
-                MATCH (n:Indicator {id: row.id})
-                MATCH (s:Sheet {name: row.sheet})
-                MERGE (n)-[:BELONGS_TO]->(s)
-                """,
-                batch=batch,
-            )
+            if self.task_id:
+                self._run(
+                    """
+                    UNWIND $batch AS row
+                    MATCH (n:Indicator {id: row.id})
+                    MATCH (s:Sheet {name: row.sheet, task_id: $task_id})
+                    MERGE (n)-[:BELONGS_TO]->(s)
+                    """,
+                    batch=batch,
+                    task_id=self.task_id,
+                )
+            else:
+                self._run(
+                    """
+                    UNWIND $batch AS row
+                    MATCH (n:Indicator {id: row.id})
+                    MATCH (s:Sheet {name: row.sheet})
+                    MERGE (n)-[:BELONGS_TO]->(s)
+                    """,
+                    batch=batch,
+                )
 
     def load_in_category(self, indicators: list[dict]):
         logger.info("Loading IN_CATEGORY relationships...")
+        prepared = self._prepare_indicators(indicators)
         rows = [
             {"id": ind["id"], "category": ind["category"]}
-            for ind in indicators
+            for ind in prepared
             if ind.get("category")
         ]
         for i in range(0, len(rows), _BATCH_SIZE):
             batch = rows[i : i + _BATCH_SIZE]
-            self._run(
-                """
-                UNWIND $batch AS row
-                MATCH (n:Indicator {id: row.id})
-                MATCH (c:Category {name: row.category})
-                MERGE (n)-[:IN_CATEGORY]->(c)
-                """,
-                batch=batch,
-            )
+            if self.task_id:
+                self._run(
+                    """
+                    UNWIND $batch AS row
+                    MATCH (n:Indicator {id: row.id})
+                    MATCH (c:Category {name: row.category, task_id: $task_id})
+                    MERGE (n)-[:IN_CATEGORY]->(c)
+                    """,
+                    batch=batch,
+                    task_id=self.task_id,
+                )
+            else:
+                self._run(
+                    """
+                    UNWIND $batch AS row
+                    MATCH (n:Indicator {id: row.id})
+                    MATCH (c:Category {name: row.category})
+                    MERGE (n)-[:IN_CATEGORY]->(c)
+                    """,
+                    batch=batch,
+                )
 
     def load_feeds_into(self):
         logger.info("Loading FEEDS_INTO sheet relationships...")
         rows = [{"from": f, "to": t} for f, t in SHEET_FEED_INTO]
-        self._run(
-            """
-            UNWIND $rows AS row
-            MATCH (a:Sheet {name: row.from})
-            MATCH (b:Sheet {name: row.to})
-            MERGE (a)-[:FEEDS_INTO]->(b)
-            """,
-            rows=rows,
-        )
+        if self.task_id:
+            self._run(
+                """
+                UNWIND $rows AS row
+                MATCH (a:Sheet {name: row.from, task_id: $task_id})
+                MATCH (b:Sheet {name: row.to, task_id: $task_id})
+                MERGE (a)-[:FEEDS_INTO]->(b)
+                """,
+                rows=rows,
+                task_id=self.task_id,
+            )
+        else:
+            self._run(
+                """
+                UNWIND $rows AS row
+                MATCH (a:Sheet {name: row.from})
+                MATCH (b:Sheet {name: row.to})
+                MERGE (a)-[:FEEDS_INTO]->(b)
+                """,
+                rows=rows,
+            )
 
     # ── Full load ─────────────────────────────────────────────────────────────
 
