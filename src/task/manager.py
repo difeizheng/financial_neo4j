@@ -117,3 +117,6 @@ class TaskManager:
 
     def get_param_snapshot_path(self, task_id: str) -> Path:
         return self.tasks_dir / task_id / "param_snapshot.json"
+
+    def get_hidden_indicators_path(self, task_id: str) -> Path:
+        return self.tasks_dir / task_id / "hidden_indicators.json"
