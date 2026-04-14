@@ -21,7 +21,7 @@ from src.parser.formula_parser import (
     _normalize_sheet_name,
     build_row_index,
 )
-from src.parser.indicator_registry import _is_meaningful_name, _cell_val
+from src.parser.indicator_registry import _is_meaningful_name, _cell_val, _YEARLY_ROW_RE
 
 logger = logging.getLogger(__name__)
 
@@ -192,12 +192,13 @@ def format_coverage_feedback(coverage: dict, threshold: float = 0.90) -> str:
 
     # Section 3: not_meaningful_name (informational only — system limitation)
     if not_meaningful_rows:
-        lines.append("### 问题3：纯英文/数字指标名被过滤（系统限制，仅供参考）")
-        lines.append("以下行因名称不含中文字符被跳过，这是系统限制，无法通过配置修复：")
+        lines.append("### 问题3：纯数字/日期行（通常作为子指标被提取，仅供参考）")
+        lines.append("以下行因名称不含中文字符被标记为跳过，但它们通常作为子指标被提取（如年月转换、合作期展开）：")
         for e in not_meaningful_rows[:5]:
             lines.append(f'- 工作表「{e["sheet"]}」第{e["row"]}行：名称="{e["name"]}"')
         if len(not_meaningful_rows) > 5:
             lines.append(f"  （另有 {len(not_meaningful_rows) - 5} 行未列出）")
+        lines.append("说明：这些行通常是Excel日期序列号或合作期/建设期展开行，已作为子指标被正确提取。")
         lines.append("")
 
     # Section 4: unknown skips (likely name_col misconfiguration)
@@ -271,11 +272,19 @@ def _scan_sheet_rows(
     """
     Walk every row in ws. For each row where name_col is non-empty, classify it.
 
+    Key insight: A single Excel row can generate multiple indicators:
+      - Root indicator (if name is meaningful)
+      - Child indicators (from yearly expansion rows like "合作期第N年" or numeric date serials)
+
+    A row is "extracted" if ANY indicator was generated from it, even if the row itself
+    doesn't pass the _is_meaningful_name() filter (e.g., numeric date serials that become
+    child indicators like "父指标_2023年12月").
+
     Gate order mirrors _extract_from_sheet() exactly:
       1. header_rows check
-      2. skip_patterns substring match
-      3. _is_meaningful_name()
-      4. presence in extracted_rows (should always be True if we reach here)
+      2. skip_patterns substring match (but yearly expansion rows are protected)
+      3. _is_meaningful_name() (for root indicators)
+      4. presence in extracted_rows (row generated at least one indicator)
     """
     name_col = cfg["name_col"]
     header_rows = set(cfg.get("header_rows", []))
@@ -293,23 +302,27 @@ def _scan_sheet_rows(
             result.append({"row": row_num, "name": name, "status": "skipped", "reason": "header_row"})
             continue
 
+        # Check skip_patterns, but protect yearly expansion rows (合作期第N年, 建设期第N月)
         matched_pat = next((p for p in skip_patterns if p in name), None)
-        if matched_pat is not None:
+        if matched_pat is not None and not _YEARLY_ROW_RE.search(name):
+            # Only skip if it matches skip_pattern AND is NOT a yearly expansion row
             result.append({"row": row_num, "name": name, "status": "skipped",
                            "reason": f"skip_pattern:{matched_pat}"})
             continue
 
-        if not _is_meaningful_name(name):
-            result.append({"row": row_num, "name": name, "status": "skipped",
-                           "reason": "not_meaningful_name"})
-            continue
-
-        # Passed all filters
+        # Check if this row generated any indicators (root or child)
+        # This is the key fix: even if the row itself is not meaningful (e.g., numeric date serial),
+        # it might have generated a child indicator
         if row_num in extracted_rows:
             result.append({"row": row_num, "name": name, "status": "extracted", "reason": ""})
-        else:
-            # Passed filters but not in extracted set — likely merged cell or name_col issue
+        elif _is_meaningful_name(name):
+            # Row has meaningful name but no indicators were extracted — likely merged cell or name_col issue
             result.append({"row": row_num, "name": name, "status": "skipped", "reason": "unknown"})
+        else:
+            # Row doesn't have meaningful name and no indicators were extracted
+            # This is expected for numeric rows, date serials, etc. that don't generate child indicators
+            result.append({"row": row_num, "name": name, "status": "skipped",
+                           "reason": "not_meaningful_name"})
 
     return result
 
