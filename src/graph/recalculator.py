@@ -40,15 +40,19 @@ class ParameterRecalculator:
         excel_path: Path,
         indicators: list[dict],
         sheet_configs: dict,
+        model_cache: Optional[dict] = None,
     ):
         self.task_id = task_id
         self.excel_path = excel_path
         self.sheet_configs = sheet_configs
+        # formulas cell key prefix: "'[filename]sheetname'!CELLREF"
+        self._excel_filename = Path(excel_path).name
 
         # Build id → indicator lookup
         self._id_to_ind: dict[str, dict] = {ind["id"]: ind for ind in indicators}
 
-        # Cache for loaded model
+        # model_cache: external dict {excel_path_str: model} for cross-call reuse
+        self._model_cache = model_cache if model_cache is not None else {}
         self._model: Optional[object] = None
 
     # ── Public API ─────────────────────────────────────────────────────────────
@@ -109,24 +113,38 @@ class ParameterRecalculator:
 
     def _load_model(self):
         """Load (or return cached) ExcelModel from the formulas library."""
+        cache_key = str(self.excel_path)
+
+        # Check external cache first (survives across ParameterRecalculator instances)
+        if cache_key in self._model_cache:
+            self._model = self._model_cache[cache_key]
+            return self._model
+
+        # Check instance cache
         if self._model is not None:
             return self._model
 
         import formulas
 
-        # formulas.ExcelModel loads the workbook with full formula support
         self._model = (
             formulas.ExcelModel()
             .loads(str(self.excel_path))
             .finish()
         )
         logger.info(f"Excel model loaded: {self.excel_path}")
+
+        # Store in external cache for reuse
+        self._model_cache[cache_key] = self._model
         return self._model
 
     # ── Cell manipulation ──────────────────────────────────────────────────────
 
+    def _cell_key(self, sheet: str, cell_ref: str) -> str:
+        """Return the formulas-library cell key: \"'[filename]sheet'!CELLREF\"."""
+        return f"'[{self._excel_filename}]{sheet}'!{cell_ref}"
+
     def _set_cell_value(self, model, ind_id: str, new_val: float | int):
-        """Set a parameter cell value in the model, then trigger recalculation."""
+        """Set a parameter cell value in the model."""
         ind = self._id_to_ind.get(ind_id)
         if not ind:
             logger.warning(f"Indicator not found for cell set: {ind_id}")
@@ -136,14 +154,18 @@ class ParameterRecalculator:
         row = ind["row"]
         start_col = self.sheet_configs.get(sheet, {}).get("formula_col", "I")
 
-        # Year 0 (first year column)
         cell_ref = self._cell_ref(sheet, row, start_col, year=0)
+        key = self._cell_key(sheet, cell_ref)
 
         try:
-            model.cells[(sheet, cell_ref)].value = float(new_val)
-            logger.debug(f"Set {sheet}!{cell_ref} = {new_val}")
+            cell = model.cells.get(key)
+            if cell is None:
+                logger.error(f"Cell not found in model: {key}")
+                return
+            cell.value = float(new_val)
+            logger.debug(f"Set {key} = {new_val}")
         except Exception as e:
-            logger.error(f"Failed to set cell {sheet}!{cell_ref}: {e}")
+            logger.error(f"Failed to set cell {key}: {e}")
 
     def _cell_ref(self, sheet: str, row: int, start_col: str, year: int) -> str:
         """Return Excel cell reference like 'I5' for year=0 or 'J5' for year=1."""
@@ -156,8 +178,9 @@ class ParameterRecalculator:
     def _get_cell_value(self, model, sheet: str, row: int, start_col: str, year: int):
         """Read a cell value from the model."""
         cell_ref = self._cell_ref(sheet, row, start_col, year)
+        key = self._cell_key(sheet, cell_ref)
         try:
-            cell = model.cells.get((sheet, cell_ref))
+            cell = model.cells.get(key)
             if cell is None:
                 return None
             val = cell.value
@@ -199,19 +222,18 @@ class ParameterRecalculator:
     def _calculate_affected(self, model, changes: dict):
         """
         Fallback: calculate only affected indicators when full recalc fails.
-        This uses the formula_parser-derived dependency graph in Neo4j.
         """
-        # Try a simple approach: just re-calculate with the new input
-        # The formulas library should handle this via its dependency tracker
         try:
-            model.calculate(deps=[self._cell_ref(
-                self._id_to_ind[ind_id]["sheet"],
-                self._id_to_ind[ind_id]["row"],
-                self.sheet_configs.get(
-                    self._id_to_ind[ind_id]["sheet"], {}
-                ).get("formula_col", "I"),
-                0,
-            ) for ind_id in changes])
+            keys = []
+            for ind_id in changes:
+                ind = self._id_to_ind.get(ind_id)
+                if ind:
+                    cell_ref = self._cell_ref(
+                        ind["sheet"], ind["row"],
+                        self.sheet_configs.get(ind["sheet"], {}).get("formula_col", "I"),
+                        0,
+                    )
+                    keys.append(self._cell_key(ind["sheet"], cell_ref))
+            model.calculate(deps=keys)
         except Exception:
-            # Last resort: just try full calculate again
             model.calculate()

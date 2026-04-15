@@ -377,36 +377,37 @@ class GraphLoader:
     # ── Update values (for parameter modification) ─────────────────────────────
 
     def update_indicator_values(self, new_values: dict[str, list]):
-        """Batch update value_year1 and values_json for multiple indicators.
-
-        Args:
-            new_values: {indicator_id: [val_y1, val_y2, ..., val_y48]}
-                        If list is length 1, updates value_year1 only (single-value param).
-        """
+        """Batch update value_year1 and values_json for multiple indicators."""
         rows = []
         for ind_id, vals in new_values.items():
             prefixed = self._prefix_id(ind_id)
             if isinstance(vals, list) and len(vals) > 0:
+                # Neo4j cannot store lists containing None — replace with 0.0
+                clean_vals = [v if v is not None else 0.0 for v in vals]
                 row = {
                     "id": prefixed,
-                    "value_year1": vals[0] if len(vals) >= 1 else None,
-                    "values_json": vals if len(vals) > 1 else None,
+                    "value_year1": clean_vals[0],
+                    "values_json": clean_vals if len(clean_vals) > 1 else None,
                 }
                 rows.append(row)
             elif isinstance(vals, (int, float)):
-                row = {"id": prefixed, "value_year1": vals, "values_json": None}
+                row = {"id": prefixed, "value_year1": float(vals), "values_json": None}
                 rows.append(row)
 
         if not rows:
             return
 
-        self._run(
-            """
-            UNWIND $rows AS row
-            MATCH (n:Indicator {id: row.id})
-            SET n.value_year1 = row.value_year1,
-                n.values_json = row.values_json
-            """,
-            rows=rows,
-        )
+        # Process in batches of 500 to avoid large single transactions
+        batch_size = 500
+        for i in range(0, len(rows), batch_size):
+            batch = rows[i:i + batch_size]
+            self._run(
+                """
+                UNWIND $rows AS row
+                MATCH (n:Indicator {id: row.id})
+                SET n.value_year1 = row.value_year1,
+                    n.values_json = row.values_json
+                """,
+                rows=batch,
+            )
         logger.info(f"Updated values for {len(rows)} indicators.")

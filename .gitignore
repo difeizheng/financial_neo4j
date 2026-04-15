@@ -80,7 +80,7 @@ ehthumbs.db
 Thumbs.db
 
 # Excel source data (optional - exclude if file is large)
-# 数字化系统财务模型边界*.xlsx
+数字化系统*.xlsx
 
 # Runtime data
 data/
