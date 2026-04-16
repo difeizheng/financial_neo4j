@@ -36,3 +36,6 @@ TASKS_DIR.mkdir(exist_ok=True)
 
 # Chat history SQLite DB
 CHAT_DB = TASKS_DIR / "chat_history.db"
+
+# Trial (试算) SQLite DB
+TRIALS_DB = TASKS_DIR / "trials.db"
